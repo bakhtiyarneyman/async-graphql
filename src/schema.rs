@@ -23,8 +23,8 @@ use crate::{
     types::QueryRoot,
     validation::{check_rules, ValidationMode},
     BatchRequest, BatchResponse, CacheControl, ContextBase, EmptyMutation, EmptySubscription,
-    Executor, InputType, ObjectType, OutputType, QueryEnv, Request, Response, ServerError,
-    ServerResult, SubscriptionType, Variables,
+    Executor, InputType, ObjectType, OutputType, PerMessagePostHook, PerMessagePreHook, QueryEnv,
+    Request, Response, ServerError, ServerResult, SubscriptionType, Variables,
 };
 
 /// Introspection mode
@@ -443,6 +443,7 @@ where
             item: &env.operation.node.selection_set,
             schema_env: &self.0.env,
             query_env: &env,
+            message_data: None,
         };
 
         let res = match &env.operation.node.ty {
@@ -489,6 +490,8 @@ where
                     self.0.recursive_depth,
                     self.0.complexity,
                     self.0.depth,
+                    None,
+                    None,
                 )
                 .await
                 {
@@ -530,6 +533,8 @@ where
         &self,
         request: impl Into<Request>,
         session_data: Arc<Data>,
+        per_message_pre_hook: Option<Arc<PerMessagePreHook>>,
+        per_message_post_hook: Option<Arc<PerMessagePostHook>>,
     ) -> impl Stream<Item = Response> + Send + Unpin {
         let schema = self.clone();
         let request = request.into();
@@ -541,7 +546,9 @@ where
             async_stream::stream! {
                 let (env, cache_control) = match prepare_request(
                         extensions, request, session_data, &env.registry,
-                        schema.0.validation_mode, schema.0.recursive_depth, schema.0.complexity, schema.0.depth
+                        schema.0.validation_mode, schema.0.recursive_depth, schema.0.complexity, schema.0.depth,
+                        per_message_pre_hook,
+                        per_message_post_hook,
                 ).await {
                     Ok(res) => res,
                     Err(errors) => {
@@ -559,6 +566,7 @@ where
                     &schema.0.env,
                     None,
                     &env.operation.node.selection_set,
+                    None,
                 );
 
                 let mut streams = Vec::new();
@@ -588,7 +596,12 @@ where
         &self,
         request: impl Into<Request>,
     ) -> impl Stream<Item = Response> + Send + Unpin {
-        self.execute_stream_with_session_data(request, Default::default())
+        self.execute_stream_with_session_data(
+            request,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
     }
 }
 
@@ -607,9 +620,17 @@ where
         &self,
         request: Request,
         session_data: Option<Arc<Data>>,
+        per_message_pre_hook: Option<Arc<PerMessagePreHook>>,
+        per_message_post_hook: Option<Arc<PerMessagePostHook>>,
     ) -> BoxStream<'static, Response> {
-        Schema::execute_stream_with_session_data(&self, request, session_data.unwrap_or_default())
-            .boxed()
+        Schema::execute_stream_with_session_data(
+            &self,
+            request,
+            session_data.unwrap_or_default(),
+            per_message_pre_hook,
+            per_message_post_hook,
+        )
+        .boxed()
     }
 }
 
@@ -733,6 +754,8 @@ pub(crate) async fn prepare_request(
     recursive_depth: usize,
     complexity: Option<usize>,
     depth: Option<usize>,
+    per_message_pre_hook: Option<Arc<PerMessagePreHook>>,
+    per_message_post_hook: Option<Arc<PerMessagePostHook>>,
 ) -> Result<(QueryEnv, CacheControl), Vec<ServerError>> {
     let mut request = request;
     let query_data = Arc::new(std::mem::take(&mut request.data));
@@ -831,6 +854,8 @@ pub(crate) async fn prepare_request(
         http_headers: Default::default(),
         introspection_mode: request.introspection_mode,
         errors: Default::default(),
+        per_message_pre_hook,
+        per_message_post_hook,
     };
     Ok((QueryEnv::new(env), validation_result.cache_control))
 }

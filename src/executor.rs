@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use futures_util::{stream::BoxStream, StreamExt};
 
-use crate::{BatchRequest, BatchResponse, Data, Request, Response};
+use crate::{
+    BatchRequest, BatchResponse, Data, PerMessagePostHook, PerMessagePreHook, Request, Response,
+};
 
 /// Represents a GraphQL executor
 #[async_trait::async_trait]
@@ -28,5 +30,7 @@ pub trait Executor: Unpin + Clone + Send + Sync + 'static {
         &self,
         request: Request,
         session_data: Option<Arc<Data>>,
+        per_message_pre_hook: Option<Arc<PerMessagePreHook>>,
+        per_message_post_hook: Option<Arc<PerMessagePostHook>>,
     ) -> BoxStream<'static, Response>;
 }

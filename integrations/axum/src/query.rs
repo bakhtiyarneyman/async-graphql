@@ -66,7 +66,7 @@ where
                     Ok(req) => req,
                     Err(err) => return Ok(err.into_response()),
                 };
-                let stream = executor.execute_stream(req.0, None);
+                let stream = executor.execute_stream(req.0, None, None, None);
                 let body = StreamBody::new(
                     create_multipart_mixed_stream(
                         stream,

@@ -1,5 +1,7 @@
 use async_graphql::*;
 use futures_util::stream::{Stream, StreamExt, TryStreamExt};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 struct Query;
 
@@ -419,4 +421,127 @@ pub async fn test_subscription_fieldresult() {
     }
 
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+pub async fn test_per_message_hooks() {
+    #[derive(Debug, Eq, PartialEq)]
+    enum LogElement {
+        PreHook,
+        OuterAccess(i32),
+        InnerAccess(i32),
+        PostHook,
+    }
+
+    type Log = Arc<Mutex<Vec<LogElement>>>;
+    let log: Log = Arc::new(Mutex::new(vec![]));
+
+    #[derive(Clone, Copy)]
+    struct Inner(i32);
+
+    #[Object]
+    impl Inner {
+        async fn value(&self, ctx: &Context<'_>) -> i32 {
+            if let Some(log) = ctx.data_opt::<Log>() {
+                log.lock().await.push(LogElement::InnerAccess(self.0));
+            }
+            self.0
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Outer(Inner);
+
+    #[Object]
+    impl Outer {
+        async fn inner(&self, ctx: &Context<'_>) -> Inner {
+            if let Some(log) = ctx.data_opt::<Log>() {
+                log.lock().await.push(LogElement::OuterAccess(self.0 .0));
+            }
+            self.0
+        }
+    }
+
+    struct Subscription;
+
+    #[Subscription]
+    impl Subscription {
+        async fn outers(&self, ctx: &Context<'_>) -> impl Stream<Item = Outer> {
+            assert!(
+                ctx.data_opt::<Log>().is_none(),
+                "Pre-hook ran before the first message"
+            );
+            futures_util::stream::iter(0..3).map(Inner).map(Outer)
+        }
+    }
+
+    let per_message_pre_hook = {
+        let log = Arc::clone(&log);
+        move || {
+            Box::pin({
+                let log = Arc::clone(&log);
+                async move {
+                    let mut data = Data::default();
+                    log.lock().await.push(LogElement::PreHook);
+                    data.insert(log);
+                    Ok(Some(data))
+                }
+            }) as futures_util::future::BoxFuture<'static, _>
+        }
+    };
+    let per_message_post_hook = {
+        let log = Arc::clone(&log);
+        move || {
+            Box::pin({
+                let log = Arc::clone(&log);
+                async move {
+                    log.lock().await.push(LogElement::PostHook);
+                    Ok(())
+                }
+            }) as futures_util::future::BoxFuture<'static, _>
+        }
+    };
+
+    let schema = Schema::new(Query, EmptyMutation, Subscription);
+    let mut stream = schema.execute_stream_with_session_data(
+        "subscription { outers { inner { value } } }",
+        Arc::new(Data::default()),
+        Some(Arc::new(per_message_pre_hook)),
+        Some(Arc::new(per_message_post_hook)),
+    );
+
+    for i in 0i32..3 {
+        assert_eq!(
+            Response::new(value!({
+                "outers": {
+                    "inner": {
+                        "value": i
+                    }
+                }
+            })),
+            stream.next().await.unwrap()
+        );
+    }
+
+    {
+        let log = log.lock().await;
+        assert_eq!(
+            *log,
+            vec![
+                LogElement::PreHook,
+                LogElement::OuterAccess(0),
+                LogElement::InnerAccess(0),
+                LogElement::PostHook,
+                LogElement::PreHook,
+                LogElement::OuterAccess(1),
+                LogElement::InnerAccess(1),
+                LogElement::PostHook,
+                LogElement::PreHook,
+                LogElement::OuterAccess(2),
+                LogElement::InnerAccess(2),
+                LogElement::PostHook,
+            ],
+            "Log mismatch"
+        );
+    }
 }
